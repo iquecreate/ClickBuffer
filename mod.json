@@ -1,0 +1,60 @@
+{
+	"geode": "5.11.1",
+	"gd": {
+		"win": "2.2081",
+		"android": "2.2081",
+		"mac": "2.2081",
+		"ios": "2.2081"
+	},
+	"version": "v1.0.0",
+	"id": "local.click_buffer",
+	"name": "Click Buffer",
+	"developer": "Me",
+	"description": "Input buffer: click up to N ticks early and the mod fires the click on the first tick it would actually work.",
+	"tags": ["gameplay", "enhancement"],
+	"settings": {
+		"enabled": {
+			"name": "Enabled",
+			"description": "Master switch for the buffer.",
+			"type": "bool",
+			"default": true
+		},
+		"buffer-ticks": {
+			"name": "Buffer Ticks",
+			"description": "How many physics ticks early a click can be. 1 tick is about 4.17 ms at the default 240 TPS, so 5 ticks is about 21 ms and 30 ticks is about 125 ms. 0 turns buffering off.",
+			"type": "int",
+			"default": 5,
+			"min": 0,
+			"max": 30,
+			"control": {
+				"slider": true,
+				"arrows": true,
+				"input": true
+			}
+		},
+		"buffer-ground": {
+			"name": "Buffer Ground Jumps",
+			"description": "Buffer clicks for cube, ball, robot and spider that are made just before landing.",
+			"type": "bool",
+			"default": true
+		},
+		"buffer-orbs": {
+			"name": "Buffer Orbs / Rings",
+			"description": "Buffer clicks that are made just before touching an orb or ring.",
+			"type": "bool",
+			"default": true
+		},
+		"practice-only": {
+			"name": "Only In Practice / Test Mode",
+			"description": "Turn the buffer off in normal runs, so it can only help you while practicing.",
+			"type": "bool",
+			"default": false
+		},
+		"debug-log": {
+			"name": "Debug Log",
+			"description": "Write a line to the Geode log whenever a click is buffered, fired or expires. Useful for checking the tick window.",
+			"type": "bool",
+			"default": false
+		}
+	}
+}
