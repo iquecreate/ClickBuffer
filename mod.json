@@ -6,12 +6,15 @@
 		"mac": "2.2081",
 		"ios": "2.2081"
 	},
-	"version": "v1.0.0",
+	"version": "v1.1.0",
 	"id": "local.click_buffer",
 	"name": "Click Buffer",
 	"developer": "Me",
-	"description": "Input buffer: click up to N ticks early and the mod fires the click on the first tick it would actually work.",
-	"tags": ["gameplay", "enhancement"],
+	"description": "Click helper: buffers early clicks for cube/ball/robot/spider/orbs, and can delay clicks in ship/UFO/wave/swing.",
+	"tags": [
+		"gameplay",
+		"enhancement"
+	],
 	"settings": {
 		"enabled": {
 			"name": "Enabled",
@@ -43,6 +46,19 @@
 			"description": "Buffer clicks that are made just before touching an orb or ring.",
 			"type": "bool",
 			"default": true
+		},
+		"hold-delay": {
+			"name": "Hold-Mode Delay",
+			"description": "Delays EVERY click (press and release) in ship, UFO, wave and swing by this many ticks, so a click you make this many ticks early lands on time. It cannot tell early clicks from on-time ones, so keep it at 0 if you click on time. 0 = off.",
+			"type": "int",
+			"default": 0,
+			"min": 0,
+			"max": 30,
+			"control": {
+				"slider": true,
+				"arrows": true,
+				"input": true
+			}
 		},
 		"practice-only": {
 			"name": "Only In Practice / Test Mode",
