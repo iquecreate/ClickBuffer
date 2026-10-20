@@ -1,16 +1,23 @@
-// Click Buffer - an input buffer for Geometry Dash 2.2081 (Geode 5.x)
+// Click Buffer - input helper for Geometry Dash 2.2081 (Geode 5.x)
 //
-// Idea: if you press jump up to N physics ticks BEFORE the press would actually
-// do something (landing for cube/ball/robot/spider, touching an orb/ring), the
-// mod remembers the press and re-sends it on the first tick where it works.
+// Two features:
+//
+// 1) LANDING BUFFER (cube, ball, robot, spider + orbs/rings)
+//    If you press jump up to N physics ticks BEFORE the press would actually do
+//    something (landing, touching an orb/ring), the mod remembers the press and
+//    re-sends it on the first tick where it works.
+//
+// 2) HOLD-MODE DELAY (ship, UFO, wave, swing)
+//    These modes react to a click instantly, so there is nothing to wait for.
+//    Instead every click (press AND release) is delayed by a fixed number of
+//    ticks. If you tend to click N ticks early, it lands on time.
 //
 // How it hooks in:
-//   * GJBaseGameLayer::handleButton    - sees every real press/release, decides
-//                                        whether the press was "used" or should
-//                                        be buffered.
+//   * GJBaseGameLayer::handleButton    - sees every real press/release and
+//                                        either forwards, buffers or delays it.
 //   * GJBaseGameLayer::processCommands - runs once per physics tick (before the
-//                                        player moves), counts the buffer down
-//                                        and fires the buffered click.
+//                                        player moves), releases delayed clicks,
+//                                        counts the buffer down and fires it.
 //   * PlayLayer::resetLevel / onQuit   - clears any pending state.
 
 #include <Geode/Geode.hpp>
@@ -20,22 +27,33 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <deque>
 
 using namespace geode::prelude;
 
 namespace {
 
-constexpr int JUMP_BUTTON = 1; // PlayerButton::Jump. Left/Right (platformer) are never buffered.
+constexpr int JUMP_BUTTON = 1; // PlayerButton::Jump. Left/Right (platformer) are never touched.
+
+// A press or release that is being held back by the hold-mode delay.
+struct DelayedEvent {
+    bool down;
+    uint64_t fireTick;
+};
 
 // One of these exists per control side: [0] = player 1 input, [1] = player 2 input.
 struct Side {
     bool physDown = false;          // what the player's finger/key is really doing
+    // landing buffer
     bool pending = false;           // a click is waiting to be fired
     uint64_t pressTick = 0;         // tick on which the real press happened
     uint64_t deadline = 0;          // last tick on which the buffered click may still fire
     uint64_t heldTicks = 1;         // how long the real press was held while waiting
     bool releaseScheduled = false;  // we fired a click for a finger that was already up
     uint64_t releaseAt = 0;         // tick on which we send the matching release
+    // hold-mode delay
+    bool pressDelayed = false;      // the current press went into the delay queue
+    std::deque<DelayedEvent> queue; // delayed events, oldest first
 };
 
 Side g_sides[2];
@@ -58,6 +76,7 @@ bool optEnabled()      { return Mod::get()->getSettingValue<bool>("enabled"); }
 int64_t optTicks()     { return Mod::get()->getSettingValue<int64_t>("buffer-ticks"); }
 bool optGround()       { return Mod::get()->getSettingValue<bool>("buffer-ground"); }
 bool optOrbs()         { return Mod::get()->getSettingValue<bool>("buffer-orbs"); }
+int64_t optHoldDelay() { return Mod::get()->getSettingValue<int64_t>("hold-delay"); }
 bool optPracticeOnly() { return Mod::get()->getSettingValue<bool>("practice-only"); }
 bool optDebug()        { return Mod::get()->getSettingValue<bool>("debug-log"); }
 
@@ -83,10 +102,14 @@ Players playersFor(GJBaseGameLayer* gl, bool isPlayer1) {
     return isPlayer1 ? Players{gl->m_player1, nullptr} : Players{nullptr, gl->m_player2};
 }
 
-// Ship, UFO, wave, swing (and a dash orb in progress) react to a held/pressed
-// button at any time, so there is nothing to buffer for them.
+// Ship, UFO, wave and swing: the click does something at any moment.
+bool isHoldMode(PlayerObject* p) {
+    return p->m_isShip || p->m_isBird || p->m_isDart || p->m_isSwing;
+}
+
+// Hold modes plus a dash orb in progress: nothing to land-buffer.
 bool reactsAnytime(PlayerObject* p) {
-    return p->m_isShip || p->m_isBird || p->m_isDart || p->m_isSwing || p->m_isDashing;
+    return isHoldMode(p) || p->m_isDashing;
 }
 
 // Is the player touching at least one orb/ring that it has not used yet?
@@ -102,14 +125,16 @@ bool ringAvailable(PlayerObject* p) {
 
 struct Assessment {
     bool anyGroundType = false; // at least one affected player is cube/ball/robot/spider
-    bool groundServed = false;  // such a player is on the ground right now
-    bool orbServed = false;     // such a player is touching an unused orb/ring right now
+    bool anyHoldMode = false;   // at least one affected player is ship/UFO/wave/swing
+    bool groundServed = false;  // a ground-type player is on the ground right now
+    bool orbServed = false;     // a ground-type player is touching an unused orb/ring right now
 };
 
 Assessment assess(GJBaseGameLayer* gl, bool isPlayer1) {
     Assessment a;
     for (auto* p : playersFor(gl, isPlayer1)) {
         if (!p || p->m_isDead) continue;
+        if (isHoldMode(p)) a.anyHoldMode = true;
         if (reactsAnytime(p)) continue;
         a.anyGroundType = true;
         if (p->m_isOnGround) a.groundServed = true;
@@ -125,6 +150,28 @@ void sendButton(bool down, bool isPlayer1) {
     if (!pl) return;
     InjectGuard guard;
     pl->handleButton(down, JUMP_BUTTON, isPlayer1);
+}
+
+// Add an event to a side's delay queue. Events keep their order, and never share
+// a tick, so a press and its release can't collapse into the same tick even if
+// the delay setting is changed while clicks are queued.
+void enqueue(Side& s, bool down, uint64_t delay) {
+    uint64_t fireTick = g_tick + delay;
+    if (!s.queue.empty()) fireTick = std::max(fireTick, s.queue.back().fireTick + 1);
+    s.queue.push_back({down, fireTick});
+}
+
+// Send every delayed event right now (used when the mod turns off mid-level, so
+// the game never ends up thinking a button is stuck down).
+void flushQueues() {
+    for (int i = 0; i < 2; ++i) {
+        Side& s = g_sides[i];
+        while (!s.queue.empty()) {
+            const DelayedEvent e = s.queue.front();
+            s.queue.pop_front();
+            sendButton(e.down, i == 0);
+        }
+    }
 }
 
 void fireBufferedClick(int index, Side& s) {
@@ -159,11 +206,20 @@ void onTick(GJBaseGameLayer* gl) {
     for (int i = 0; i < 2; ++i) {
         Side& s = g_sides[i];
 
+        // 1) delayed clicks that are due (hold-mode delay)
+        while (!s.queue.empty() && g_tick >= s.queue.front().fireTick) {
+            const DelayedEvent e = s.queue.front();
+            s.queue.pop_front();
+            sendButton(e.down, i == 0);
+        }
+
+        // 2) the release that matches a buffered click we fired for a lifted finger
         if (s.releaseScheduled && g_tick >= s.releaseAt) {
             s.releaseScheduled = false;
             if (!s.physDown) sendButton(false, i == 0);
         }
 
+        // 3) the landing buffer
         if (!s.pending) continue;
 
         if (g_tick > s.deadline) {
@@ -197,15 +253,31 @@ class $modify(ClickBufferBaseGameLayer, GJBaseGameLayer) {
         }
 
         Side& s = g_sides[isPlayer1 ? 0 : 1];
+        const uint64_t delay = static_cast<uint64_t>(std::max<int64_t>(0, optHoldDelay()));
 
         if (down) {
-            // Judge the press BEFORE forwarding it, using the state it would see.
             const Assessment a = assess(this, isPlayer1);
-            const bool used = !a.anyGroundType || a.groundServed || a.orbServed;
 
             s.physDown = true;
             s.pending = false;
             s.heldTicks = 1;
+
+            // Hold-mode delay: only when every affected icon is ship/UFO/wave/swing.
+            // If earlier events are still queued, queue this one too so order is kept.
+            const bool holdOnly = a.anyHoldMode && !a.anyGroundType;
+            if ((holdOnly && delay > 0) || !s.queue.empty()) {
+                s.pressDelayed = true;
+                enqueue(s, true, delay);
+                if (optDebug()) {
+                    log::info("[ClickBuffer] delaying press by {} tick(s) (P{})",
+                              delay, isPlayer1 ? 1 : 2);
+                }
+                return;
+            }
+            s.pressDelayed = false;
+
+            // Landing buffer: judge the press BEFORE forwarding it.
+            const bool used = !a.anyGroundType || a.groundServed || a.orbServed;
 
             GJBaseGameLayer::handleButton(down, button, isPlayer1);
 
@@ -224,6 +296,19 @@ class $modify(ClickBufferBaseGameLayer, GJBaseGameLayer) {
             if (s.pending) {
                 s.heldTicks = std::max<uint64_t>(1, g_tick - s.pressTick);
             }
+
+            // A release follows its press: if the press was delayed (or events are
+            // still queued), delay the release by the same amount.
+            if (s.pressDelayed || !s.queue.empty()) {
+                s.pressDelayed = false;
+                enqueue(s, false, delay);
+                if (optDebug()) {
+                    log::info("[ClickBuffer] delaying release by {} tick(s) (P{})",
+                              delay, isPlayer1 ? 1 : 2);
+                }
+                return;
+            }
+
             GJBaseGameLayer::handleButton(down, button, isPlayer1);
         }
     }
@@ -235,6 +320,7 @@ class $modify(ClickBufferBaseGameLayer, GJBaseGameLayer) {
                 ++g_tick;
                 onTick(this);
             } else {
+                flushQueues();
                 resetState();
             }
         }
